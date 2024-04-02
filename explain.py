@@ -7,7 +7,7 @@ def connect_to_db():
     try:
         conn = psycopg2.connect(
             dbname='TPC-H',
-            user='localhost',
+            user='postgres',
             password='password',
             host='localhost',
             port="5432",
@@ -49,25 +49,29 @@ def parse_and_explain(qep):
     # The complexity of this function will vary depending on how detailed you want the explanation to be.
     # As a starting point, focus on identifying key operations (e.g., Seq Scan, Index Scan) and their costs.
     
-    # Sample placeholder logic
     explanation = "Query Plan Explanation:\n"
-    for plan in qep[0]['Plan']:
-        explanation += explain_node(plan)
-    return explanation 
+    # Since the top-level of JSON is a list, iterate through each element (plan).
+    for plan in qep:
+        explanation += explain_node(plan['Plan'])  # Adjusted to access the 'Plan' key directly
+    return explanation
 
 
 def explain_node(node, depth=0):
     # Recursively explain a single node in the QEP.
     # Placeholder for explanation logic for a single node.
     # You might want to detail the type of scan, estimated rows, cost, etc.
-    explanation = "\t"*depth + f"Node Type: {node['Node Type']}, Cost: {node['Total Cost']}\n"
+    node_type = node.get('Node Type', 'Unknown')
+    total_cost = node.get('Total Cost', 'Unknown')  # Use 'get' to avoid KeyError if the key is absent
+    explanation = "\t" * depth + f"Node Type: {node_type}, Cost: {total_cost}\n"
+    
+    # Check and recursively explain child nodes if they exist
     if 'Plans' in node:
-        for child in node['Plans']:
+        for child in node['Plans']:  # 'Plans' is expected to be a list of child plans
             explanation += explain_node(child, depth + 1)
     return explanation
 
 if __name__ == '__main__':
     # Example usage for testing
-    query = "SELECT * FROM your_table WHERE your_condition;"
+    query = "SELECT * FROM customer C, orders O WHERE C.c_custkey = O.o_custkey AND O.o_orderstatus='F' AND O.o_shippriority = 0 AND C.c_custkey < 500;"
     qep, explanation = analyze_query(query)
     print(explanation)
