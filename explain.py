@@ -1,6 +1,7 @@
 import psycopg2
 import psycopg2.extras
 import json
+from psycopg2.sql import SQL, Identifier
 
 def connect_to_db():
     # Create a connection to the PostgreSQL database.
@@ -33,29 +34,40 @@ def execute_explain(query):
     else:
         return None
 
-def analyze_query(query):
+def analyze_query(query, cursor):
     # Analyze the given SQL query, returning a QEP and its cost explanation.
+    # No changes to execute_explain(), since it creates its own connection and cursor.
     qep = execute_explain(query)
     if qep is not None:
-        explanation = parse_and_explain(qep)
+        explained_nodes = set()
+        explanation = parse_and_explain(qep, cursor, explained_nodes)  # Pass explained_nodes here
         return qep, explanation
     else:
         print("Failed to fetch the QEP from the database.")
-        return None 
+        return None, ""
 
-def parse_and_explain(qep_json):
-    # Parse the QEP and generate a explanation of cost estimations.
-
+def parse_and_explain(qep_json, cursor, explained_nodes):
+    # Parse the QEP and generate an explanation of cost estimations.
     explanation = "Query Plan Explanation:\n"
     for qep_part in qep_json:
         plan = qep_part['Plan']
-        explanation += explain_node(plan)
+        explanation += explain_node(plan, cursor, 0, explained_nodes)  
     return explanation
 
 
-def explain_node(node, depth=0):
+def explain_node(node, cursor, depth=0, explained_nodes=None):
     # Recursively explain a single node in the QEP.
     
+    if explained_nodes is None:
+        explained_nodes = set()
+
+    # Create a unique identifier for the node to check if it's been explained
+    node_identifier = (node.get('Node Type'), node.get('Plan Rows'), node.get('Total Cost'))
+
+    if node_identifier in explained_nodes:
+        # Skip this node to prevent duplicate explanations
+        return ''
+    explained_nodes.add(node_identifier)
 
     # Start building the explanation string with node type and basic cost details
     node_type = node.get('Node Type', 'Unknown')
@@ -63,6 +75,7 @@ def explain_node(node, depth=0):
     total_cost = node.get('Total Cost', 'Unknown')
     rows = node.get('Plan Rows', 'Unknown')
     width = node.get('Plan Width', 'Unknown')
+
     explanation = "------------------\n"
     explanation += f"Node Type: {node_type} (Cost: {startup_cost}..{total_cost} rows={rows} width={width})\n"
 
@@ -113,10 +126,14 @@ def explain_node(node, depth=0):
     elif node.get('Node Type') == "Aggregate":
         explanation += explain_aggregate(node, depth + 1)
 
+    explanation += add_theoretical_costs(node, cursor)
+
     # Recursively explain child nodes if they exist
     if 'Plans' in node:
         for child in node['Plans']:
-            explanation += explain_node(child, depth + 1)
+            child_explanation = explain_node(child, cursor, depth + 1, explained_nodes)
+            explanation += child_explanation
+
 
     return explanation
 
@@ -162,8 +179,58 @@ def explain_aggregate(node, depth):
                    f"This cost reflects the computation and grouping of rows based on the group key.\n"
     return explanation
 
+def get_relation_stats(cursor, relation_name):
+    cursor.execute(SQL("SELECT reltuples, relpages FROM pg_class WHERE relname = %s;"), (relation_name,))
+    result = cursor.fetchone()
+    if result is None:
+        raise ValueError(f"Stats not found for relation: {relation_name}")
+    return result
+
+def get_attribute_stats(cursor, relation_name, attribute_name):
+    # Fetch the number of distinct values for a given attribute in a relation
+    cursor.execute(SQL("SELECT n_distinct FROM pg_stats WHERE tablename = %s AND attname = %s;"), (relation_name, attribute_name))
+    return cursor.fetchone()[0]
+
+# Function to calculate and add theoretical costs to the explanation
+def add_theoretical_costs(node, cursor):
+    explanation = ""
+    node_type = node.get('Node Type')
+
+    if 'Relation Name' in node:
+        relation_name = node['Relation Name']
+        tuples, pages = get_relation_stats(cursor, relation_name)
+    else:
+        tuples = pages = None  # Defaults in case we can't get specific stats
+        
+    # Adjust formula based on node type
+    if node_type in ["Hash Join", "Nested Loop", "Merge Join"]:
+        # For join nodes, you might want to handle them differently since they operate on the results of child nodes
+        # Example for handling a hash join's theoretical cost:
+        if node_type == "Hash Join":
+            # This is a simplification; adjust according to your formulas and possibly consider child node stats
+            if tuples and pages:
+                theoretical_cost = 3 * (pages + tuples)  # Placeholder formula
+                explanation = f"Theoretical Cost (Hash Join): {theoretical_cost}\n"
+        # Add handling for other joins and operations as necessary
+    elif tuples and pages:
+        # Handle single-relation operations
+        if node_type == "Seq Scan":
+            # Adjust with the actual formula for sequential scans
+            theoretical_cost = tuples * pages  # Placeholder formula
+            explanation = f"Theoretical Cost (Seq Scan): {theoretical_cost}\n"
+        # Add more conditions for other operations
+
+    return explanation
+
+
 if __name__ == '__main__':
     # Example usage for testing
     query = "SELECT * FROM customer C, orders O WHERE C.c_custkey = O.o_custkey AND O.o_orderstatus='F' AND O.o_shippriority = 0 AND C.c_custkey < 500;"
-    qep, explanation = analyze_query(query)
-    print(explanation)
+    conn = connect_to_db()
+    with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cursor:
+        qep_json, explanation = analyze_query(query, cursor)
+        if qep_json:
+            main_plan = qep_json[0]['Plan']  # Assuming qep_json is not None and is a list
+            explanation += explain_node(main_plan, cursor, 0, explained_nodes=set())  # Initialize explained_nodes as an empty set
+        print(explanation)
+        conn.close()
