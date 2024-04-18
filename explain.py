@@ -2,6 +2,7 @@ import psycopg2
 import psycopg2.extras
 from psycopg2.sql import SQL, Identifier
 from psycopg2.extras import DictCursor
+from math import log2
 
 # Database connection management
 class DBConnection:
@@ -73,6 +74,7 @@ class SeqScanNode(Node):
                 manual_cost = num_pages  # Assuming cost per page is 1 for simplicity
                 explanation = f"{indent}Table '{table_name}' stats: {stats['reltuples']} rows, {num_pages} pages.\n"
                 explanation += f"{indent}Manual Cost Formula: B(R) = {manual_cost}\n"
+                explanation += f"{indent}Difference Explanation: PostgreSQL factors in parallel CPU processing making in more efficient in estimations.\n"
                 return explanation
         return ""
 
@@ -91,6 +93,7 @@ class IndexScanNode(Node):
                 manual_cost = num_tuples_read  # Assuming cost per tuple read is 1 for simplicity
                 explanation = f"{indent}Index '{index_name}' on table '{table_name}' stats: scans {num_scans}, tuples read {num_tuples_read}.\n"
                 explanation += f"{indent}Manual Cost Formula: T(R) / V(R, a) = {manual_cost}\n"
+                explanation += f"{indent}Difference Explaination: PostgreSQL optimizes index scans with cost estimates based on index selectivity, which may not be fully captured here\n"
                 return explanation
         return ""
 
@@ -106,6 +109,7 @@ class BitmapIndexScanNode(Node):
                 manual_cost = index_stats['idx_scan']  # Simplified example
                 explanation = f"{indent}Index '{index_name}' stats: scans {index_stats['idx_scan']}, tuples read {index_stats['idx_tup_read']}.\n"
                 explanation += f"{indent}Manual Cost Formula: Cost is based on number of scans: {manual_cost}\n"
+                explanation += f"{indent}Differece Explanation: PostgreSQL might optimize this by batching and combining index scans for efficiency, not reflected in this simple model\n"
                 return explanation
         return ""
 
@@ -122,6 +126,7 @@ class BitmapHeapScanNode(Node):
                 manual_cost = num_pages * 0.1  # Assume each page cost is reduced by bitmap index efficiency
                 explanation = f"{indent}Table '{table_name}' stats: {stats['reltuples']} rows, {num_pages} pages.\n"
                 explanation += f"{indent}Manual Cost Formula: Bitmap Heap Scan Cost = Pages * Reduced Cost/Page = {manual_cost}\n"
+                explanation += f"{indent}Differece Explanation: PostgreSQL execution might use bloom filters or other structures to further reduce page access, not accounted here\n"
                 return explanation
         return ""
 
@@ -136,6 +141,8 @@ class NestedLoopJoinNode(Node):
         manual_cost = left_cost + (left_child.get('Plan Rows', 0) * right_cost)
         explanation = f"{indent}Nested Loop Join uses condition: {self.node_json.get('Join Filter', 'No specific join condition reported')}\n"
         explanation += f"{indent}Manual Cost Formula: Outer Loop Cost + (Outer Loop Rows × Inner Loop Cost) = {manual_cost}\n"
+        explanation += f"{indent}Difference Explanation: PostgreSQL may optimize nested loop joins by using indexing on the inner relation or caching the inner relation in memory if it is small enough. These optimizations can significantly reduce the actual cost compared to the manual estimation, especially if the inner relation is accessed multiple times.\n"
+        explanation += f"{indent}PostgreSQL also considers the cost of handling tuples that meet the join condition and may benefit from tuple prefetching and other join algorithms when applicable.\n"
         return explanation
 
 @register_node('Merge Join')
@@ -149,6 +156,7 @@ class MergeJoinNode(Node):
         manual_cost = (left_cost + right_cost) * 1.5  # Assume some additional cost for merging
         explanation = f"{indent}Merge Join on keys: {self.node_json.get('Merge Key', 'No merge keys reported')}\n"
         explanation += f"{indent}Manual Cost Formula: (Sort Cost of Left Side + Sort Cost of Right Side + Merge Cost) = {manual_cost}\n"
+        explanation += f"{indent}Difference Explanation: PostgreSQL's optimizer might choose this join for its efficiency in certain sorted datasets, a nuance not captured by the simple manual cost.\n"
         return explanation
 
 @register_node('Hash')
@@ -160,6 +168,7 @@ class HashNode(Node):
         manual_cost = estimated_rows * 0.5  # Assume some cost per hashed row
         explanation = f"{indent}Hash operation involves approximately {estimated_rows} rows.\n"
         explanation += f"{indent}Manual Cost Formula: Hash Cost = Estimated Rows * Cost per row = {manual_cost}\n"
+        explanation += f"{indent}Difference Explanation: Actual hash costs in PostgreSQL also consider factors such as hash bucket density and memory availability.\n"
         return explanation
 
 @register_node('Hash Join')
@@ -173,6 +182,204 @@ class HashJoinNode(Node):
         manual_cost = left_cost + right_cost
         explanation = f"{indent}Hash Join uses condition: {self.node_json.get('Hash Cond', 'No hash condition reported')}\n"
         explanation += f"{indent}Manual Cost Formula: 3(B(R) + B(S)) = {manual_cost}\n"
+        explanation += f"{indent}Difference Explanation: PostgreSQL may optimize hash joins with in-memory hash tables, which can significantly alter the real-world costs, not shown here.\n"
+        return explanation
+
+@register_node('Gather')
+class GatherNode(Node):
+    def fetch_stats(self, depth):
+        indent = '    ' * depth
+        total_cost = sum(child.get('Total Cost', 0) for child in self.node_json.get('Plans', []))
+        explanation = f"{indent}Gather node combines the output of child nodes executed by parallel workers.\n"
+        explanation += f"{indent}Manual Cost Formula: Sum of children costs = {total_cost}\n"
+        explanation += f"{indent}Difference Explanation: PostgreSQL's implementation may include additional parallel setup and communication costs.\n"
+        return explanation
+
+@register_node('Gather Merge')
+class GatherMergeNode(Node):
+    def fetch_stats(self, depth):
+        indent = '    ' * depth
+        child_costs = [child.get('Total Cost', 0) for child in self.node_json.get('Plans', [])]
+        total_cost = sum(child_costs)
+        merge_cost = len(child_costs) * log2(len(child_costs)) if child_costs else 0
+        total_cost += merge_cost
+        explanation = f"{indent}Gather Merge combines sorted outputs of parallel workers preserving the order.\n"
+        explanation += f"{indent}Manual Cost Formula: Sum of child costs + Merge cost = {total_cost}\n"
+        explanation += f"{indent}Difference Explanation: PostgreSQL uses a heap that at any instant holds the next tuple from each stream, which can affect performance depending on the size of streams.\n"
+        return explanation
+
+@register_node('Sort')
+class SortNode(Node):
+    def fetch_stats(self, depth):
+        indent = '    ' * depth
+        rel_name = self.node_json.get('Relation Name')
+        sort_method = self.node_json.get('Sort Method', 'unknown')
+        manual_cost = {
+            'external merge': lambda x: x * 3,
+            'quicksort': lambda x: x,
+            'top-N heapsort': lambda x: x / 3
+        }.get(sort_method, lambda x: x)(self.node_json.get('Total Cost', 0))
+        explanation = f"{indent}Sort on relation: {rel_name} using {sort_method}.\n"
+        explanation += f"{indent}Manual Cost Formula: {sort_method} cost = {manual_cost}\n"
+        explanation += f"{indent}Difference Explanation: PostgreSQL may adjust costs based on work memory and actual data size which are not factored into manual calculations.\n"
+        return explanation
+
+@register_node('Incremental Sort')
+class IncrementalSortNode(Node):
+    def fetch_stats(self, depth):
+        indent = '    ' * depth
+        relation_name = self.node_json.get('Relation Name')
+        # Example SQL query to fetch total and estimated sorted blocks
+        self.cursor.execute("SELECT total_blocks, estimated_sorted_blocks FROM some_table WHERE relation_name = %s", (relation_name,))
+        data = self.cursor.fetchone()
+        total_blocks = data['total_blocks']
+        estimated_sorted_blocks = data['estimated_sorted_blocks']
+        manual_cost = total_blocks - estimated_sorted_blocks
+        explanation = f"{indent}Incremental sort on {relation_name} with partially ordered input.\n"
+        explanation += f"{indent}Manual Cost Formula: B(rel) - Estimated Sorted Blocks = {manual_cost}\n"
+        explanation += f"{indent}Difference Explanation: PostgreSQL uses different calculations for the number of groups with equal presorted keys.\n"
+        return explanation
+
+@register_node('Limit')
+class LimitNode(Node):
+    def fetch_stats(self, depth):
+        indent = '    ' * depth
+        relation_name = self.node_json.get('Relation Name')
+        # Example SQL query to fetch block counts
+        self.cursor.execute("SELECT block_count FROM some_table WHERE relation_name = %s", (relation_name,))
+        block_count = self.cursor.fetchone()['block_count']
+        manual_cost = block_count
+        explanation = f"{indent}Limit operation on {relation_name}.\n"
+        explanation += f"{indent}Manual Cost Formula: B(rel) = {manual_cost}\n"
+        explanation += f"{indent}Difference Explanation: In reality, PostgreSQL will process fewer rows due to the limit clause.\n"
+        return explanation
+
+@register_node('Materialize')
+class MaterializeNode(Node):
+    def fetch_stats(self, depth):
+        indent = '    ' * depth
+        relation_name = self.node_json.get('Relation Name')
+        # SQL query to fetch tuple counts
+        self.cursor.execute("SELECT tuple_count FROM some_table WHERE relation_name = %s", (relation_name,))
+        tuple_count = self.cursor.fetchone()['tuple_count']
+        manual_cost = tuple_count * 2
+        explanation = f"{indent}Materialize intermediate results for {relation_name}.\n"
+        explanation += f"{indent}Manual Cost Formula: T(rel) * 2 = {manual_cost}\n"
+        explanation += f"{indent}Difference Explanation: PostgreSQL includes CPU and I/O costs for writing to and reading from temporary storage.\n"
+        return explanation
+
+@register_node('Memoize')
+class MemoizeNode(Node):
+    def fetch_stats(self, depth):
+        indent = '    ' * depth
+        explanation = f"{indent}Memoize reuses results of expensive suboperations.\n"
+        explanation += f"{indent}Manual Cost Formula: 0 (No additional cost for cached results)\n"
+        explanation += f"{indent}Difference Explanation: Costs depend on operation frequency and cache hit rate.\n"
+        return explanation
+
+@register_node('Aggregate')
+class AggregateNode(Node):
+    def fetch_stats(self, depth):
+        indent = '    ' * depth
+        relation_name = self.node_json.get('Relation Name')
+        # Fetch the total tuples and the count of unique groups (assuming group key defined)
+        self.cursor.execute("SELECT COUNT(*), COUNT(DISTINCT group_key) FROM " + relation_name)
+        result = self.cursor.fetchone()
+        total_tuples = result[0]
+        unique_groups = result[1]
+        if self.node_json.get("Strategy") == "Hashed":
+            manual_cost = total_tuples  # Assuming a simplified model for hashed aggregation
+        else:
+            manual_cost = total_tuples * unique_groups
+        explanation = f"{indent}Aggregate operation on {relation_name}.\n"
+        explanation += f"{indent}Manual Cost Formula: T(rel) * Number of Groups = {manual_cost}\n"
+        explanation += f"{indent}Difference Explanation: PostgreSQL uses optimized aggregation strategies that might affect performance differently.\n"
+        return explanation
+
+@register_node('Group')
+class GroupNode(Node):
+    def fetch_stats(self, depth):
+        indent = '    ' * depth
+        relation_name = self.node_json.get('Relation Name')
+        # SQL query to get the count of distinct group keys
+        self.cursor.execute("SELECT COUNT(DISTINCT group_key) FROM " + relation_name)
+        num_groups = self.cursor.fetchone()[0]
+        self.cursor.execute("SELECT COUNT(*) FROM " + relation_name)
+        num_tuples = self.cursor.fetchone()[0]
+        manual_cost = num_tuples * num_groups
+        explanation = f"{indent}Group by operation on {relation_name}.\n"
+        explanation += f"{indent}Manual Cost Formula: T(rel) * Number of Group Columns = {manual_cost}\n"
+        explanation += f"{indent}Difference Explanation: PostgreSQL incorporates advanced optimizations for group by operations.\n"
+        return explanation
+
+@register_node('Unique')
+class UniqueNode(Node):
+    def fetch_stats(self, depth):
+        indent = '    ' * depth
+        relation_name = self.node_json.get('Relation Name')
+        # Example SQL query to find the number of unique tuples
+        self.cursor.execute("SELECT COUNT(DISTINCT *) FROM " + relation_name)
+        unique_count = self.cursor.fetchone()[0]
+        manual_cost = unique_count  # Simplified assumption
+        explanation = f"{indent}Unique operation to remove duplicates from {relation_name}.\n"
+        explanation += f"{indent}Manual Cost Formula: Number of Unique Rows = {manual_cost}\n"
+        explanation += f"{indent}Difference Explanation: PostgreSQL may use different strategies for de-duplication based on the query plan.\n"
+        return explanation
+
+@register_node('Bitmap And')
+class BitmapAndNode(Node):
+    def fetch_stats(self, depth):
+        indent = '    ' * depth
+        explanation = f"{indent}Bitmap AND operation is generally negligible in cost.\n"
+        explanation += f"{indent}Manual Cost Formula: Negligible.\n"
+        explanation += f"{indent}Difference Explanation: PostgreSQL manages bitmap operations in memory, rarely requiring additional computation.\n"
+        return explanation
+
+@register_node('Bitmap Or')
+class BitmapOrNode(Node):
+    def fetch_stats(self, depth):
+        indent = '    ' * depth
+        explanation = f"{indent}Bitmap OR operation is generally negligible in cost.\n"
+        explanation += f"{indent}Manual Cost Formula: Negligible.\n"
+        explanation += f"{indent}Difference Explanation: PostgreSQL processes these operations with minimal overhead.\n"
+        return explanation
+
+@register_node('Append')
+class AppendNode(Node):
+    def fetch_stats(self, depth):
+        indent = '    ' * depth
+        total_cost = 0
+        stats = ""
+        for child in self.children:
+            child_stats = child.fetch_stats(depth + 1)
+            stats += child_stats
+            # Parse or extract cost from child_stats if structured correctly
+            # This assumes child_stats includes a cost calculation that can be parsed
+            total_cost += int(child_stats.split("Cost: ")[1].split(',')[0])
+
+        explanation = f"{indent}Append Node combines results of sub-plans.\n"
+        explanation += stats
+        explanation += f"{indent}Manual Cost: {total_cost} (aggregated from child nodes).\n"
+        explanation += f"{indent}Difference Explanation: PostgreSQL dynamically computes the cost based on child plans, possibly including additional overhead.\n"
+        return explanation
+
+@register_node('Merge Append')
+class MergeAppendNode(Node):
+    def fetch_stats(self, depth):
+        indent = '    ' * depth
+        total_cost = 0
+        stats = ""
+        for child in self.children:
+            child_stats = child.fetch_stats(depth + 1)
+            stats += child_stats
+            # Similarly, parse the manual cost from child stats
+            total_cost += int(child_stats.split("Cost: ")[1].split(',')[0])
+
+        merge_cost = len(self.children) * 10  # Simplified merge cost for example
+        explanation = f"{indent}Merge Append Node combines sorted results of child operations, preserving their order. Includes cost of merging.\n"
+        explanation += stats
+        explanation += f"{indent}Manual Cost: {total_cost + merge_cost}.\n"
+        explanation += f"{indent}Difference Explanation: PostgreSQL also considers the complexity of maintaining heap structures during merging.\n"
         return explanation
 
 # Execution and explanation parsing
