@@ -51,34 +51,93 @@ class Node:
         explanation = f"{indent}Node Type: {self.node_json.get('Node Type', 'Unknown')}\n"
         explanation += f"{indent}Cost: Startup {self.node_json.get('Startup Cost')}, Total {self.node_json.get('Total Cost')}\n"
         explanation += f"{indent}Rows: {self.node_json.get('Plan Rows')}, Width: {self.node_json.get('Plan Width')}\n"
-        explanation += self.fetch_stats()
+        explanation += self.fetch_stats(depth)
         for child in self.children:
             explanation += child.explain(depth + 1)
         return explanation
+    
+    def fetch_stats(self, depth):
+        return ""
 
 # Specific Node implementations
 @register_node('Seq Scan')
 class SeqScanNode(Node):
-    def fetch_stats(self):
+    def fetch_stats(self, depth):
+        indent = '    ' * depth
         table_name = self.node_json.get('Relation Name')
         if table_name:
             self.cursor.execute("SELECT reltuples, relpages FROM pg_class WHERE relname = %s", (table_name,))
             stats = self.cursor.fetchone()
             if stats:
-                return f"Table '{table_name}' stats: {stats['reltuples']} rows, {stats['relpages']} pages.\n"
+                return f"{indent}Table '{table_name}' stats: {stats['reltuples']} rows, {stats['relpages']} pages.\n"
         return ""
 
 @register_node('Index Scan')
 class IndexScanNode(Node):
-    def fetch_stats(self):
+    def fetch_stats(self, depth):
+        indent = '    ' * depth
         index_name = self.node_json.get('Index Name')
         table_name = self.node_json.get('Relation Name')
         if index_name and table_name:
             self.cursor.execute("SELECT idx_scan, idx_tup_read FROM pg_stat_user_indexes WHERE indexrelname = %s", (index_name,))
             if index_stats:
                 index_stats = self.cursor.fetchone()
-            return f"Index '{index_name}' on table '{table_name}' stats: scans {index_stats['idx_scan']}, tuples read {index_stats['idx_tup_read']}.\n"
+            return f"{indent}Index '{index_name}' on table '{table_name}' stats: scans {index_stats['idx_scan']}, tuples read {index_stats['idx_tup_read']}.\n"
         return ""
+
+@register_node('Bitmap Index Scan')
+class BitmapIndexScanNode(Node):
+    def fetch_stats(self, depth):
+        indent = '    ' * depth
+        index_name = self.node_json.get('Index Name')
+        if index_name:
+            self.cursor.execute("SELECT idx_scan, idx_tup_read FROM pg_stat_user_indexes WHERE indexrelname = %s", (index_name,))
+            index_stats = self.cursor.fetchone()
+            if index_stats:
+                return f"{indent}    Index '{index_name}' stats: scans {index_stats['idx_scan']}, tuples read {index_stats['idx_tup_read']}.\n"
+        return ""
+
+@register_node('Bitmap Heap Scan')
+class BitmapHeapScanNode(Node):
+    def fetch_stats(self, depth):
+        indent = '    ' * depth
+        table_name = self.node_json.get('Relation Name')
+        if table_name:
+            self.cursor.execute("SELECT reltuples, relpages FROM pg_class WHERE relname = %s", (table_name,))
+            stats = self.cursor.fetchone()
+            if stats:
+                return f"{indent}    Table '{table_name}' stats: {stats['reltuples']} rows, {stats['relpages']} pages.\n"
+        return ""
+
+@register_node('Nested Loop Join')
+class NestedLoopJoinNode(Node):
+    def fetch_stats(self, depth):
+        indent = '    ' * depth
+        # Example of adding join condition details
+        join_condition = self.node_json.get('Join Filter', 'No specific join condition reported')
+        return f"{indent}    Nested Loop Join uses condition: {join_condition}\n"
+
+@register_node('Merge Join')
+class MergeJoinNode(Node):
+    def fetch_stats(self, depth):
+        indent = '    ' * depth
+        sort_keys = self.node_json.get('Merge Key', 'No merge keys reported')
+        return f"{indent}    Merge Join on keys: {sort_keys}\n"
+
+@register_node('Hash')
+class HashNode(Node):
+    def fetch_stats(self, depth):
+        indent = '    ' * depth
+        # Hypothetical memory usage statistics
+        memory_usage = self.node_json.get('Memory Usage', 'Memory details not provided')
+        return f"{indent}    Hash operation with memory usage: {memory_usage}\n"
+
+@register_node('Hash Join')
+class HashJoinNode(Node):
+    def fetch_stats(self, depth):
+        indent = '    ' * depth
+        hash_conditions = self.node_json.get('Hash Cond', 'No hash condition reported')
+        return f"{indent}    Hash Join uses condition: {hash_conditions}\n"
 
 # Execution and explanation parsing
 def execute_explain(query):
