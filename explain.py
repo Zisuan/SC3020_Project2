@@ -1,7 +1,7 @@
 import psycopg2
 import psycopg2.extras
 from psycopg2.sql import SQL, Identifier
-from psycopg2 import OperationalError
+from psycopg2.extras import DictCursor
 
 # Database connection management
 class DBConnection:
@@ -69,7 +69,11 @@ class SeqScanNode(Node):
             self.cursor.execute("SELECT reltuples, relpages FROM pg_class WHERE relname = %s", (table_name,))
             stats = self.cursor.fetchone()
             if stats:
-                return f"{indent}Table '{table_name}' stats: {stats['reltuples']} rows, {stats['relpages']} pages.\n"
+                num_pages = stats['relpages']
+                manual_cost = num_pages  # Assuming cost per page is 1 for simplicity
+                explanation = f"{indent}Table '{table_name}' stats: {stats['reltuples']} rows, {num_pages} pages.\n"
+                explanation += f"{indent}Manual Cost Formula: B(R) = {manual_cost}\n"
+                return explanation
         return ""
 
 @register_node('Index Scan')
@@ -80,9 +84,14 @@ class IndexScanNode(Node):
         table_name = self.node_json.get('Relation Name')
         if index_name and table_name:
             self.cursor.execute("SELECT idx_scan, idx_tup_read FROM pg_stat_user_indexes WHERE indexrelname = %s", (index_name,))
+            index_stats = self.cursor.fetchone()
             if index_stats:
-                index_stats = self.cursor.fetchone()
-            return f"{indent}Index '{index_name}' on table '{table_name}' stats: scans {index_stats['idx_scan']}, tuples read {index_stats['idx_tup_read']}.\n"
+                num_scans = index_stats['idx_scan']
+                num_tuples_read = index_stats['idx_tup_read']
+                manual_cost = num_tuples_read  # Assuming cost per tuple read is 1 for simplicity
+                explanation = f"{indent}Index '{index_name}' on table '{table_name}' stats: scans {num_scans}, tuples read {num_tuples_read}.\n"
+                explanation += f"{indent}Manual Cost Formula: T(R) / V(R, a) = {manual_cost}\n"
+                return explanation
         return ""
 
 @register_node('Bitmap Index Scan')
@@ -94,7 +103,10 @@ class BitmapIndexScanNode(Node):
             self.cursor.execute("SELECT idx_scan, idx_tup_read FROM pg_stat_user_indexes WHERE indexrelname = %s", (index_name,))
             index_stats = self.cursor.fetchone()
             if index_stats:
-                return f"{indent}    Index '{index_name}' stats: scans {index_stats['idx_scan']}, tuples read {index_stats['idx_tup_read']}.\n"
+                manual_cost = index_stats['idx_scan']  # Simplified example
+                explanation = f"{indent}Index '{index_name}' stats: scans {index_stats['idx_scan']}, tuples read {index_stats['idx_tup_read']}.\n"
+                explanation += f"{indent}Manual Cost Formula: Cost is based on number of scans: {manual_cost}\n"
+                return explanation
         return ""
 
 @register_node('Bitmap Heap Scan')
@@ -106,45 +118,67 @@ class BitmapHeapScanNode(Node):
             self.cursor.execute("SELECT reltuples, relpages FROM pg_class WHERE relname = %s", (table_name,))
             stats = self.cursor.fetchone()
             if stats:
-                return f"{indent}    Table '{table_name}' stats: {stats['reltuples']} rows, {stats['relpages']} pages.\n"
+                num_pages = stats['relpages']
+                manual_cost = num_pages * 0.1  # Assume each page cost is reduced by bitmap index efficiency
+                explanation = f"{indent}Table '{table_name}' stats: {stats['reltuples']} rows, {num_pages} pages.\n"
+                explanation += f"{indent}Manual Cost Formula: Bitmap Heap Scan Cost = Pages * Reduced Cost/Page = {manual_cost}\n"
+                return explanation
         return ""
 
 @register_node('Nested Loop Join')
 class NestedLoopJoinNode(Node):
     def fetch_stats(self, depth):
         indent = '    ' * depth
-        # Example of adding join condition details
-        join_condition = self.node_json.get('Join Filter', 'No specific join condition reported')
-        return f"{indent}    Nested Loop Join uses condition: {join_condition}\n"
+        left_child = self.node_json.get('Plans', [])[0] if 'Plans' in self.node_json else {}
+        right_child = self.node_json.get('Plans', [])[1] if len(self.node_json.get('Plans', [])) > 1 else {}
+        left_cost = left_child.get('Total Cost', 0)
+        right_cost = right_child.get('Total Cost', 0)
+        manual_cost = left_cost + (left_child.get('Plan Rows', 0) * right_cost)
+        explanation = f"{indent}Nested Loop Join uses condition: {self.node_json.get('Join Filter', 'No specific join condition reported')}\n"
+        explanation += f"{indent}Manual Cost Formula: Outer Loop Cost + (Outer Loop Rows × Inner Loop Cost) = {manual_cost}\n"
+        return explanation
 
 @register_node('Merge Join')
 class MergeJoinNode(Node):
     def fetch_stats(self, depth):
         indent = '    ' * depth
-        sort_keys = self.node_json.get('Merge Key', 'No merge keys reported')
-        return f"{indent}    Merge Join on keys: {sort_keys}\n"
+        left_child = self.node_json.get('Plans', [])[0] if 'Plans' in self.node_json else {}
+        right_child = self.node_json.get('Plans', [])[1] if len(self.node_json.get('Plans', [])) > 1 else {}
+        left_cost = left_child.get('Total Cost', 0)
+        right_cost = right_child.get('Total Cost', 0)
+        manual_cost = (left_cost + right_cost) * 1.5  # Assume some additional cost for merging
+        explanation = f"{indent}Merge Join on keys: {self.node_json.get('Merge Key', 'No merge keys reported')}\n"
+        explanation += f"{indent}Manual Cost Formula: (Sort Cost of Left Side + Sort Cost of Right Side + Merge Cost) = {manual_cost}\n"
+        return explanation
 
 @register_node('Hash')
 class HashNode(Node):
     def fetch_stats(self, depth):
         indent = '    ' * depth
-        # Hypothetical memory usage statistics
-        memory_usage = self.node_json.get('Memory Usage', 'Memory details not provided')
-        return f"{indent}    Hash operation with memory usage: {memory_usage}\n"
+        # Example of assuming memory cost per hashed row
+        estimated_rows = self.node_json.get('Plan Rows', 0)
+        manual_cost = estimated_rows * 0.5  # Assume some cost per hashed row
+        explanation = f"{indent}Hash operation involves approximately {estimated_rows} rows.\n"
+        explanation += f"{indent}Manual Cost Formula: Hash Cost = Estimated Rows * Cost per row = {manual_cost}\n"
+        return explanation
 
 @register_node('Hash Join')
 class HashJoinNode(Node):
     def fetch_stats(self, depth):
         indent = '    ' * depth
-        hash_conditions = self.node_json.get('Hash Cond', 'No hash condition reported')
-        return f"{indent}    Hash Join uses condition: {hash_conditions}\n"
+        left_child = self.node_json['Plans'][0]  # Assuming left child exists
+        right_child = self.node_json['Plans'][1]  # Assuming right child exists
+        left_cost = 3 * left_child['Total Cost']  # Simplified example
+        right_cost = 3 * right_child['Total Cost']  # Simplified example
+        manual_cost = left_cost + right_cost
+        explanation = f"{indent}Hash Join uses condition: {self.node_json.get('Hash Cond', 'No hash condition reported')}\n"
+        explanation += f"{indent}Manual Cost Formula: 3(B(R) + B(S)) = {manual_cost}\n"
+        return explanation
 
 # Execution and explanation parsing
-def execute_explain(query):
-    with DBConnection('TPC-H', 'postgres', 'password', 'localhost', "5432") as conn:
-        with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
-            cur.execute(SQL("EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) {}").format(SQL(query)))
-            return cur.fetchone()[0]
+def execute_explain(query, cursor):
+    cursor.execute(SQL("EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) {}").format(SQL(query)))
+    return cursor.fetchone()[0]
 
 def parse_and_explain(qep_json, cursor):
     def create_node(plan, cursor):
@@ -162,18 +196,18 @@ def parse_and_explain(qep_json, cursor):
                 stack.append((child_node, subplan))
     return root_node.explain()
 
-def analyze_query(query):
-    with DBConnection('TPC-H', 'postgres', 'password', 'localhost', "5432") as conn:
-        with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
-            qep = execute_explain(query)
-            if qep:
-                explanation = "Query Plan Explanation:\n" + parse_and_explain(qep[0], cur)
-                return qep, explanation
-            else:
-                print("Failed to fetch the QEP from the database.")
-                return None, ""
+def analyze_query(query, conn):
+    with conn.cursor(cursor_factory=DictCursor) as cur:  
+        qep = execute_explain(query, cur)
+        if qep:
+            explanation = "Query Plan Explanation:\n" + parse_and_explain(qep[0], cur)
+            return qep, explanation
+        else:
+            print("Failed to fetch the QEP from the database.")
+            return None, ""
 
 if __name__ == '__main__':
-    query = "SELECT * FROM customer C, orders O WHERE C.c_custkey = O.o_custkey;"
-    qep_json, explanation = analyze_query(query)
-    print(explanation)
+    with DBConnection('TPC-H', 'postgres', 'password', 'localhost', "5432") as conn:
+        query = "SELECT * FROM customer C, orders O WHERE C.c_custkey = O.o_custkey;"
+        qep_json, explanation = analyze_query(query, conn)
+        print(explanation)
