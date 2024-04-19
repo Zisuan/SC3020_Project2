@@ -60,9 +60,72 @@ class Node:
     def fetch_stats(self, depth):
         return ""
 
+class ScanNodes(Node):
+
+    def fetch_stats(self, depth):
+        indent = '    ' * depth
+        stats_info = super().fetch_stats(depth)  # Call to base class fetch_stats if needed
+
+        num_tuples = self.cardinality(True)
+        num_blocks = self.cardinality(False)
+        
+        # Building stats information string
+        stats_info += f"{indent}Estimated Tuples: {num_tuples}, Estimated Blocks: {num_blocks}\n"
+        stats_info += f"{indent}Filter/Condition: {self.node_json.get('Filter', self.node_json.get('Index Cond', 'None'))}\n"
+        return stats_info
+
+    def cardinality(self, is_tuple):
+        rel = self.node_json.get("Relation Name", "unknown")
+        self.cursor.execute("SELECT reltuples, relpages FROM pg_class WHERE relname = %s", (rel,))
+        stats = self.cursor.fetchone()
+        if not stats:
+            return 0
+
+        num_blocks = stats['relpages']
+        num_tuples = stats['reltuples']
+
+        if "Filter" not in self.node_json and "Index Cond" not in self.node_json:
+            return num_tuples if is_tuple else num_blocks
+
+        selectivity = self.estimate_selectivity()
+        return int(num_tuples * selectivity) if is_tuple else int(num_blocks * selectivity)
+
+    def estimate_selectivity(self):
+        if "Filter" in self.node_json:
+            conditions = self.node_json["Filter"]
+        elif "Index Cond" in self.node_json:
+            conditions = self.node_json["Index Cond"]
+        else:
+            return 1  # No condition selectivity = 1
+
+        attr = self.retrieve_attribute_from_condition()
+        op = self.retrieve_operator_from_condition()
+
+        self.cursor.execute(f"SELECT COUNT(DISTINCT {attr}) FROM {self.node_json.get('Relation Name')}")
+        num_unique = self.cursor.fetchone()[0]
+
+        if ">" in op or "<" in op:
+            return 1 / 3
+        elif num_unique == 0:
+            return 0
+        else:
+            return 1 / num_unique
+
+    def retrieve_attribute_from_condition(self):
+        condition = self.node_json.get("Filter") or self.node_json.get("Index Cond")
+        if condition:
+            return condition.split()[0].strip("()").split(".")[-1]
+        return None
+
+    def retrieve_operator_from_condition(self):
+        condition = self.node_json.get("Filter") or self.node_json.get("Index Cond")
+        if condition:
+            return condition.split()[1]
+        return None
+
 # Specific Node implementations
-@register_node('Seq Scan') # done
-class SeqScanNode(Node):
+@register_node('Seq Scan')
+class SeqScanNode(ScanNodes):  # Inherit from ScanNodes
     def fetch_stats(self, depth):
         indent = '    ' * depth
         table_name = self.node_json.get('Relation Name')
@@ -70,22 +133,21 @@ class SeqScanNode(Node):
             self.cursor.execute("SELECT reltuples, relpages FROM pg_class WHERE relname = %s", (table_name,))
             stats = self.cursor.fetchone()
             if stats:
-                num_pages = stats['relpages']
-                manual_cost = num_pages  # Assuming cost per page is 1 for simplicity
+                manual_cost = stats['relpages']  # Simplified cost calculation based on page count
                 dbms_estimated_cost = self.node_json.get('Total Cost')
 
-                explanation = f"{indent}Table '{table_name}' stats: {stats['reltuples']} rows, {num_pages} pages.\n"
+                explanation = super().fetch_stats(depth)  # Call to modified fetch_stats from ScanNodes
                 explanation += f"{indent}Manual Cost Formula: B(R) = {manual_cost}\n"
                 explanation += f"{indent}Calculated Cost: {manual_cost} (Estimated Cost by DBMS: {dbms_estimated_cost})\n"
                 
                 if manual_cost != dbms_estimated_cost:
-                    explanation += f"{indent}Difference Explanation: PostgreSQL factors in parallel CPU processing and other efficiencies not accounted for in the simple block count.\n"
+                    explanation += f"{indent}Difference Explanation: PostgreSQL factors in efficiencies not captured here.\n"
                 
                 return explanation
         return ""
 
 @register_node('Index Scan')
-class IndexScanNode(Node): # Not very sure
+class IndexScanNode(ScanNodes):  # Inherit from ScanNodes
     def fetch_stats(self, depth):
         indent = '    ' * depth
         index_name = self.node_json.get('Index Name')
@@ -94,16 +156,16 @@ class IndexScanNode(Node): # Not very sure
             self.cursor.execute("SELECT idx_scan, idx_tup_read FROM pg_stat_user_indexes WHERE indexrelname = %s", (index_name,))
             index_stats = self.cursor.fetchone()
             if index_stats:
-                num_scans = index_stats['idx_scan']
-                num_tuples_read = index_stats['idx_tup_read']
-                manual_cost = self.calculate_cost(table_name, index_name)
+                manual_cost = index_stats['idx_tup_read']  # Simplified cost calculation based on tuple reads
                 estimated_cost = self.node_json.get('Total Cost')
 
-                explanation = f"{indent}Index '{index_name}' on table '{table_name}' stats: scans {num_scans}, tuples read {num_tuples_read}.\n"
-                explanation += f"{indent}Manual Cost Formula: Cost = T(R) / V(R, a) = {manual_cost}\n"
+                explanation = super().fetch_stats(depth)  # Call to modified fetch_stats from ScanNodes
+                explanation += f"{indent}Manual Cost Formula: T(R) / V(R, a) = {manual_cost}\n"
                 explanation += f"{indent}Calculated Cost: {manual_cost} (Estimated Cost by DBMS: {estimated_cost})\n"
+                
                 if manual_cost != estimated_cost:
-                    explanation += f"{indent}Difference Explanation: PostgreSQL optimizes index scans with cost estimates based on index selectivity, caching, and disk I/O, which may not be fully captured here.\n"
+                    explanation += f"{indent}Difference Explanation: Factors like index selectivity and disk I/O are optimized by PostgreSQL.\n"
+                
                 return explanation
         return ""
 
@@ -159,9 +221,10 @@ class BitmapHeapScanNode(Node): # No formula provided by course
 
 
 @register_node('Nested Loop Join') # done
-class NestedLoopJoinNode(Node):
-   def fetch_stats(self, depth):
+class NestedLoopJoinNode(ScanNodes): 
+    def fetch_stats(self, depth):
         indent = '    ' * depth
+        base_stats = super().fetch_stats(depth)
         left_child = self.node_json.get('Plans', [])[0] if 'Plans' in self.node_json else {}
         right_child = self.node_json.get('Plans', [])[1] if len(self.node_json.get('Plans', [])) > 1 else {}
         left_cost = left_child.get('Total Cost', 0)
@@ -176,45 +239,49 @@ class NestedLoopJoinNode(Node):
         if manual_cost != estimated_cost:
             explanation += f"{indent}Difference Explanation: PostgreSQL may optimize nested loop joins by using indexing on the inner relation or caching the inner relation in memory if it is small enough. These optimizations can significantly reduce the actual cost compared to the manual estimation, especially if the inner relation is accessed multiple times.\n"
             explanation += f"{indent}PostgreSQL also considers the cost of handling tuples that meet the join condition and may benefit from tuple prefetching and other join algorithms when applicable.\n"
-        return explanation
+        return base_stats + explanation
 
 @register_node('Merge Join') # done
-class MergeJoinNode(Node):
+class MergeJoinNode(ScanNodes):
     def fetch_stats(self, depth):
         indent = '    ' * depth
+        base_stats = super().fetch_stats(depth)
         left_child = self.node_json.get('Plans', [])[0] if 'Plans' in self.node_json else {}
         right_child = self.node_json.get('Plans', [])[1] if len(self.node_json.get('Plans', [])) > 1 else {}
         left_cost = left_child.get('Total Cost', 0)
         right_cost = right_child.get('Total Cost', 0)
         manual_cost = 3 * (left_cost + right_cost)
         estimated_cost = self.node_json.get('Total Cost')
+
         explanation = f"{indent}Merge Join on keys: {self.node_json.get('Merge Key', 'No merge keys reported')}\n"
         explanation += f"{indent}Manual Cost Formula: 3(B(R) + B(S)) = {manual_cost}\n"
         explanation += f"{indent}Calculated Cost: {manual_cost} (Estimated Cost by DBMS: {estimated_cost})\n"
         if manual_cost != estimated_cost:
             explanation += f"{indent}Difference Explanation: PostgreSQL's optimizer might choose this join for its efficiency in certain sorted datasets, a nuance not captured by the simple manual cost.\n"
-        return explanation
+        return base_stats + explanation
 
 @register_node('Hash') # No formula provided by course
-class HashNode(Node):
+class HashNode(ScanNodes):
     def fetch_stats(self, depth):
         indent = '    ' * depth
+        base_stats = super().fetch_stats(depth)
         estimated_rows = self.node_json.get('Plan Rows', 0)
         estimated_cost = self.node_json.get('Total Cost')
         explanation = f"{indent}Hash operation involves approximately {estimated_rows} rows.\n"
         explanation += f"{indent}Manual Cost Formula not available\n"
-        explanation += f"Estimated Cost by DBMS: {estimated_cost}\n"
+        explanation += f"{indent}Estimated Cost by DBMS: {estimated_cost}\n"
         #explanation += f"{indent}Difference Explanation: Actual hash costs in PostgreSQL also consider factors such as hash bucket density and memory availability.\n"
-        return explanation
+        return base_stats + explanation
 
 @register_node('Hash Join') # done
-class HashJoinNode(Node):
+class HashJoinNode(ScanNodes):
     def fetch_stats(self, depth):
         indent = '    ' * depth
-        left_child = self.node_json['Plans'][0] 
-        right_child = self.node_json['Plans'][1] 
-        R_block_size = left_child.get('Plan Rows', 0)  
-        S_block_size = right_child.get('Plan Rows', 0)  
+        base_stats = super().fetch_stats(depth)
+        left_child = self.node_json['Plans'][0]
+        right_child = self.node_json['Plans'][1]
+        R_block_size = left_child.get('Plan Rows', 0)
+        S_block_size = right_child.get('Plan Rows', 0)
         manual_cost = 3 * (R_block_size + S_block_size)
         estimated_cost = self.node_json.get('Total Cost')
         explanation = f"{indent}Hash Join uses condition: {self.node_json.get('Hash Cond', 'No hash condition reported')}\n"
@@ -222,49 +289,52 @@ class HashJoinNode(Node):
         explanation += f"{indent}Calculated Cost: {manual_cost} (Estimated Cost by DBMS: {estimated_cost})\n"
         if manual_cost != estimated_cost:
             explanation += f"{indent}Difference Explanation: PostgreSQL may optimize hash joins with in-memory hash tables, which can significantly alter the real-world costs, not shown here.\n"
-        return explanation
+        return base_stats + explanation
 
 @register_node('Gather')  # No formula provided by course
-class GatherNode(Node): 
+@register_node('Gather')
+class GatherNode(ScanNodes):
     def fetch_stats(self, depth):
         indent = '    ' * depth
+        base_stats = super().fetch_stats(depth)
         estimated_cost = self.node_json.get('Total Cost')
         explanation = f"{indent}Gather node combines the output of child nodes executed by parallel workers.\n"
         explanation += f"{indent}Manual Cost Formula not available\n"
         explanation += f"Estimated Cost by DBMS: {estimated_cost}\n"
-        #explanation += f"{indent}Difference Explanation: PostgreSQL's implementation may include additional parallel setup and communication costs.\n"
-        return explanation
+        return base_stats + explanation
 
 @register_node('Gather Merge')  # No formula provided by course
-class GatherMergeNode(Node):
+class GatherMergeNode(ScanNodes):
     def fetch_stats(self, depth):
         indent = '    ' * depth
+        base_stats = super().fetch_stats(depth)
         estimated_cost = self.node_json.get('Total Cost')
         explanation = f"{indent}Gather Merge combines sorted outputs of parallel workers preserving the order.\n"
         explanation += f"{indent}Manual Cost Formula not available\n"
         explanation += f"Estimated Cost by DBMS: {estimated_cost}\n"
         #explanation += f"{indent}Difference Explanation: PostgreSQL uses a heap that at any instant holds the next tuple from each stream, which can affect performance depending on the size of streams.\n"
-        return explanation
+        return base_stats + explanation
 
 @register_node('Sort') # Done
-class SortNode(Node):
+class SortNode(ScanNodes):
     def fetch_stats(self, depth):
         indent = '    ' * depth
+        base_stats = super().fetch_stats(depth)
         rel_name = self.node_json.get('Relation Name')
         if rel_name:
             self.cursor.execute("SELECT relpages FROM pg_class WHERE relname = %s", (rel_name,))
             result = self.cursor.fetchone()
             if result:
                 num_blocks = result[0]
-                manual_cost = 3 * num_blocks 
+                manual_cost = 3 * num_blocks
                 estimated_cost = self.node_json.get('Total Cost')
                 explanation = f"{indent}Sort on relation: {rel_name}.\n"
                 explanation += f"{indent}Manual Cost Formula: 3B = {manual_cost}\n"
                 explanation += f"{indent}Calculated Cost: {manual_cost} (Estimated Cost by DBMS: {estimated_cost})\n"
                 if manual_cost != estimated_cost:
                     explanation += f"{indent}Difference Explanation: PostgreSQL may adjust costs based on work memory and actual data size which are not factored into manual calculations.\n"
-                    return explanation
-        return f"{indent}Unable to retrieve block information for relation: {rel_name}\n"
+                    return base_stats + explanation
+        return f"{indent}Unable to retrieve block information for relation: {rel_name}\n" + base_stats
 
 # Execution and explanation parsing
 def execute_explain(query, cursor):
