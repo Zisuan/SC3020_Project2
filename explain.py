@@ -51,7 +51,6 @@ class Node:
         indent = '    ' * depth
         explanation = f"{indent}Node Type: {self.node_json.get('Node Type', 'Unknown')}\n"
         explanation += f"{indent}Estimated Cost: Startup {self.node_json.get('Startup Cost')},Total {self.node_json.get('Total Cost')}\n"
-        #explanation += f"{indent}Rows: {self.node_json.get('Plan Rows')}, Width: {self.node_json.get('Plan Width')}\n"
         explanation += self.fetch_stats(depth)
         for child in self.children:
             explanation += child.explain(depth + 1)
@@ -176,49 +175,6 @@ class IndexScanNode(ScanNodes):  # Inherit from ScanNodes
         self.cursor.execute("SELECT count(DISTINCT column_name) FROM table_name WHERE index_name = %s", (index_name,))
         unique_values = self.cursor.fetchone()[0]
         return total_tuples / unique_values if unique_values else total_tuples  # Protect against division by zero if no unique values
-'''
-@register_node('Bitmap Index Scan')
-class BitmapIndexScanNode(Node): # No formula provided by course
-    def fetch_stats(self, depth):
-        indent = '    ' * depth
-        index_name = self.node_json.get('Index Name')
-        if index_name:
-            # Fetching index usage stats
-            self.cursor.execute("SELECT idx_scan, idx_tup_read FROM pg_stat_user_indexes WHERE indexrelname = %s", (index_name,))
-            index_stats = self.cursor.fetchone()
-            if index_stats:
-                # Getting more precise cost metrics could involve estimating the actual heap accesses needed
-                self.cursor.execute("SELECT reltuples FROM pg_class WHERE relname = %s", (self.node_json.get('Relation Name'),))
-                table_stats = self.cursor.fetchone()
-                estimated_cost = self.node_json.get('Total Cost')
-                if table_stats:
-                    explanation = f"{indent}Index '{index_name}' stats: scans {index_stats['idx_scan']}, tuples read {index_stats['idx_tup_read']}.\n"
-                    explanation += f"{indent}Manual Cost Formula not available\n"
-                    explanation += f"Estimated Cost by DBMS: {estimated_cost}\n"
-                    #explanation += f"{indent}Differece Explanation: PostgreSQL might optimize this by batching and combining index scans for efficiency, not reflected in this simple model\n"
-                    return explanation
-        return ""
-
-@register_node('Bitmap Heap Scan')
-class BitmapHeapScanNode(Node): # No formula provided by course
-    def fetch_stats(self, depth):
-        indent = '    ' * depth
-        table_name = self.node_json.get('Relation Name')
-        if table_name:
-            self.cursor.execute("SELECT reltuples, relpages FROM pg_class WHERE relname = %s", (table_name,))
-            stats = self.cursor.fetchone()
-            if stats:
-                num_pages = stats['relpages']
-                num_tuples = stats['reltuples']
-                estimated_cost = self.node_json.get('Total Cost')
-                explanation = f"{indent}Table '{table_name}' stats: {num_tuples} rows, {num_pages} pages.\n"
-                explanation += f"{indent}Manual Cost Formula not available\n"
-                explanation += f"Estimated Cost by DBMS: {estimated_cost}\n"
-                #explanation += f"{indent}Differece Explanation: PostgreSQL execution might use bloom filters or other structures to further reduce page access, not accounted here\n"
-                return explanation
-        return ""
-'''
-
 
 @register_node('Nested Loop Join') # done
 class NestedLoopJoinNode(ScanNodes): 
