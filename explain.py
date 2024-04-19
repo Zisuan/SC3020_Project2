@@ -348,18 +348,10 @@ class BitmapOrNode(Node):
 class AppendNode(Node):
     def fetch_stats(self, depth):
         indent = '    ' * depth
-        total_cost = 0
-        stats = ""
-        for child in self.children:
-            child_stats = child.fetch_stats(depth + 1)
-            stats += child_stats
-            # Parse or extract cost from child_stats if structured correctly
-            # This assumes child_stats includes a cost calculation that can be parsed
-            total_cost += int(child_stats.split("Cost: ")[1].split(',')[0])
-
+        child_costs = [child.node_json.get('Total Cost', 0) for child in self.children]
+        total_cost = sum(child_costs)
         explanation = f"{indent}Append Node combines results of sub-plans.\n"
-        explanation += stats
-        explanation += f"{indent}Manual Cost: {total_cost} (aggregated from child nodes).\n"
+        explanation += f"{indent}Manual Cost Formula: Sum of child costs = {total_cost}\n"
         explanation += f"{indent}Difference Explanation: PostgreSQL dynamically computes the cost based on child plans, possibly including additional overhead.\n"
         return explanation
 
@@ -367,18 +359,12 @@ class AppendNode(Node):
 class MergeAppendNode(Node):
     def fetch_stats(self, depth):
         indent = '    ' * depth
-        total_cost = 0
-        stats = ""
-        for child in self.children:
-            child_stats = child.fetch_stats(depth + 1)
-            stats += child_stats
-            # Similarly, parse the manual cost from child stats
-            total_cost += int(child_stats.split("Cost: ")[1].split(',')[0])
-
-        merge_cost = len(self.children) * 10  # Simplified merge cost for example
+        child_costs = [child.node_json.get('Total Cost', 0) for child in self.children]
+        total_cost = sum(child_costs)
+        merge_cost = len(self.children) * log2(len(self.children)) if self.children else 0
+        total_cost += merge_cost
         explanation = f"{indent}Merge Append Node combines sorted results of child operations, preserving their order. Includes cost of merging.\n"
-        explanation += stats
-        explanation += f"{indent}Manual Cost: {total_cost + merge_cost}.\n"
+        explanation += f"{indent}Manual Cost Formula: Sum of child costs + Merge cost = {total_cost}\n"
         explanation += f"{indent}Difference Explanation: PostgreSQL also considers the complexity of maintaining heap structures during merging.\n"
         return explanation
 
@@ -404,14 +390,19 @@ def parse_and_explain(qep_json, cursor):
     return root_node.explain()
 
 def analyze_query(query, conn):
-    with conn.cursor(cursor_factory=DictCursor) as cur:  
-        qep = execute_explain(query, cur)
-        if qep:
-            explanation = "Query Plan Explanation:\n" + parse_and_explain(qep[0], cur)
-            return qep, explanation
-        else:
-            print("Failed to fetch the QEP from the database.")
-            return None, ""
+    try:
+        with conn.cursor(cursor_factory=DictCursor) as cur:
+            qep = execute_explain(query, cur)
+            if qep:
+                explanation = "Query Plan Explanation:\n" + parse_and_explain(qep[0], cur)
+                return qep, explanation
+    except psycopg2.DatabaseError as db_err:
+        return None, f"Database error: {db_err}"
+    except psycopg2.ProgrammingError as pg_err:
+        return None, f"Programming error: {pg_err}"
+    except Exception as e:
+        return None, f"An error occurred: {e}"
+
 
 if __name__ == '__main__':
     with DBConnection('TPC-H', 'postgres', 'password', 'localhost', "5432") as conn:

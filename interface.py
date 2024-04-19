@@ -28,9 +28,15 @@ class AppGUI:
     def on_submit(self):
         query = self.query_input.get("1.0", tk.END).strip()
         if query:
-            self.on_submit_callback(query)  # Call the callback function with the query
+            try:
+                self.on_submit_callback(query)  # Call the callback function with the query
+            except Exception as e:#error handling
+                self.display_error(str(e))
         else:
-            messagebox.showerror("Error", "Please enter a SQL query.")
+            self.display_error("Please enter a SQL query.") #error handling
+
+    def display_error(self, message):
+        messagebox.showerror("Error", message)
 
     def display_explanation(self, explanation):
         self.explanation_display.config(state='normal')
