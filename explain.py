@@ -264,7 +264,7 @@ class GatherNode(ScanNodes):
         estimated_cost = self.node_json.get('Total Cost')
         explanation = f"{indent}Gather node combines the output of child nodes executed by parallel workers.\n"
         explanation += f"{indent}Manual Cost Formula not available\n"
-        explanation += f"Estimated Cost by DBMS: {estimated_cost}\n"
+        explanation += f"{indent}Estimated Cost by DBMS: {estimated_cost}\n"
         return base_stats + explanation
 
 @register_node('Gather Merge')  # No formula provided by course
@@ -321,23 +321,42 @@ def parse_and_explain(qep_json, cursor):
                 stack.append((child_node, subplan))
     return root_node.explain()
 
+def extract_node_data(plan):
+    node_data = {
+        'type': plan['Node Type'],
+        'cost': plan['Total Cost'],
+        'children': [extract_node_data(child) for child in plan.get('Plans', [])]
+    }
+    return node_data
+
+def convert_qep_to_graph_data(qep_json):
+    # Extract and convert the JSON into a structure that contains nodes and their relationships
+    # This is a placeholder for your implementation
+    root_node = qep_json['Plan']
+    graph_data = {'root': extract_node_data(root_node)}
+    return graph_data
+
 def analyze_query(query, conn):
     try:
         with conn.cursor(cursor_factory=DictCursor) as cur:
             qep = execute_explain(query, cur)
             if qep:
                 explanation = "Query Plan Explanation:\n" + parse_and_explain(qep[0], cur)
-                return qep, explanation
+                graph_data = convert_qep_to_graph_data(qep[0])  
+                return qep, explanation, graph_data
+            else:
+                return None, "No QEP found for the given query.", None
+            
     except psycopg2.DatabaseError as db_err:
-        return None, f"Database error: {db_err}"
+        return None, f"Database error: {db_err}", None
     except psycopg2.ProgrammingError as pg_err:
-        return None, f"Programming error: {pg_err}"
+        return None, f"Programming error: {pg_err}", None
     except Exception as e:
-        return None, f"An error occurred: {e}"
+        return None, f"An error occurred: {e}", None
 
 
 if __name__ == '__main__':
     with DBConnection('TPC-H', 'postgres', 'password', 'localhost', "5432") as conn:
         query = "SELECT * FROM customer C, orders O WHERE C.c_custkey = O.o_custkey;"
-        qep_json, explanation = analyze_query(query, conn)
+        qep_json, explanation, graph_data = analyze_query(query, conn)
         print(explanation)
