@@ -44,6 +44,7 @@ class Node:
         self.children = []
 
     def fetch_stats(self):
+        # This method will be overridden in child classes if needed.
         return ""
 
     def explain(self, depth=0):
@@ -62,11 +63,12 @@ class ScanNodes(Node):
 
     def fetch_stats(self, depth):
         indent = '    ' * depth
-        stats_info = super().fetch_stats(depth)
+        stats_info = super().fetch_stats(depth)  # Call to base class fetch_stats if needed
 
         num_tuples = self.cardinality(True)
         num_blocks = self.cardinality(False)
         
+        # Building stats information string
         stats_info += f"{indent}Estimated Tuples: {num_tuples}, Estimated Blocks: {num_blocks}\n"
         stats_info += f"{indent}Filter/Condition: {self.node_json.get('Filter', self.node_json.get('Index Cond', 'None'))}\n"
         return stats_info
@@ -122,7 +124,7 @@ class ScanNodes(Node):
 
 # Specific Node implementations
 @register_node('Seq Scan')
-class SeqScanNode(ScanNodes):#done
+class SeqScanNode(ScanNodes):  # Inherit from ScanNodes
     def fetch_stats(self, depth):
         indent = '    ' * depth
         table_name = self.node_json.get('Relation Name')
@@ -130,10 +132,10 @@ class SeqScanNode(ScanNodes):#done
             self.cursor.execute("SELECT reltuples, relpages FROM pg_class WHERE relname = %s", (table_name,))
             stats = self.cursor.fetchone()
             if stats:
-                manual_cost = stats['relpages'] 
+                manual_cost = stats['relpages']  # Simplified cost calculation based on page count
                 dbms_estimated_cost = self.node_json.get('Total Cost')
 
-                explanation = super().fetch_stats(depth)
+                explanation = super().fetch_stats(depth)  # Call to modified fetch_stats from ScanNodes
                 explanation += f"{indent}Manual Cost Formula: B(R) = {manual_cost}\n"
                 explanation += f"{indent}Calculated Cost: {manual_cost} (Estimated Cost by DBMS: {dbms_estimated_cost})\n"
                 
@@ -144,45 +146,35 @@ class SeqScanNode(ScanNodes):#done
         return ""
 
 @register_node('Index Scan')
-class IndexScanNode(ScanNodes):
+class IndexScanNode(ScanNodes):  # Inherit from ScanNodes
     def fetch_stats(self, depth):
         indent = '    ' * depth
         index_name = self.node_json.get('Index Name')
         table_name = self.node_json.get('Relation Name')
-        filter_condition = self.node_json.get('Index Cond', '').strip()
-
         if index_name and table_name:
-            estimated_cost = self.node_json.get('Total Cost')
-            manual_cost = self.calculate_cost(table_name, index_name, filter_condition)
+            self.cursor.execute("SELECT idx_scan, idx_tup_read FROM pg_stat_user_indexes WHERE indexrelname = %s", (index_name,))
+            index_stats = self.cursor.fetchone()
+            if index_stats:
+                manual_cost = index_stats['idx_tup_read']  # Simplified cost calculation based on tuple reads
+                estimated_cost = self.node_json.get('Total Cost')
 
-            explanation = super().fetch_stats(depth)
-            explanation += f"{indent}Manual Cost Formula: Index Scan Cost = {manual_cost}\n"
-            explanation += f"{indent}Calculated Cost: {manual_cost} (Estimated Cost by DBMS: {estimated_cost})\n"
-
-            if manual_cost != estimated_cost:
-                explanation += f"{indent}Difference Explanation: Factors like index selectivity and disk I/O are optimized by PostgreSQL.\n"
-
-            return explanation
+                explanation = super().fetch_stats(depth)  # Call to modified fetch_stats from ScanNodes
+                explanation += f"{indent}Manual Cost Formula: T(R) / V(R, a) = {manual_cost}\n"
+                explanation += f"{indent}Calculated Cost: {manual_cost} (Estimated Cost by DBMS: {estimated_cost})\n"
+                
+                if manual_cost != estimated_cost:
+                    explanation += f"{indent}Difference Explanation: Factors like index selectivity and disk I/O are optimized by PostgreSQL.\n"
+                
+                return explanation
         return ""
 
-    def calculate_cost(self, table_name, index_name, filter_condition):
-        self.cursor.execute("SELECT relname, n_live_tup FROM pg_stat_user_tables WHERE relname = %s", (index_name,))
-
-        # Calculate selectivity for condition
-        self.cursor.execute(f"SELECT COUNT(*) FROM {table_name} WHERE {filter_condition}")
-        result = self.cursor.fetchone()
-        matching_rows = result[0] if result else 0
-
-        self.cursor.execute(f"SELECT reltuples FROM pg_class WHERE relname = %s", (table_name,))
-        result = self.cursor.fetchone()
-        total_rows = result[0] if result else 0
-
-        selectivity = matching_rows / total_rows if total_rows > 0 else 0
-
-        index_scan_cost = selectivity * total_rows
-
-        return index_scan_cost
-
+    def calculate_cost(self, table_name, index_name):
+        # Fetch total tuples (T(R)) and unique values (V(R, a))
+        self.cursor.execute("SELECT reltuples FROM pg_class WHERE relname = %s", (table_name,))
+        total_tuples = self.cursor.fetchone()[0]
+        self.cursor.execute("SELECT count(DISTINCT column_name) FROM table_name WHERE index_name = %s", (index_name,))
+        unique_values = self.cursor.fetchone()[0]
+        return total_tuples / unique_values if unique_values else total_tuples  # Protect against division by zero if no unique values
 
 @register_node('Nested Loop Join') # done
 class NestedLoopJoinNode(ScanNodes): 
