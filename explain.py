@@ -100,8 +100,7 @@ class ScanNodes(Node):
         attr = self.retrieve_attribute_from_condition()
         op = self.retrieve_operator_from_condition()
 
-        self.cursor.execute(f"SELECT COUNT(DISTINCT {attr}) FROM {self.node_json.get('Relation Name')}")
-        num_unique = self.cursor.fetchone()[0]
+        num_unique = 0
 
         if ">" in op or "<" in op:
             return 1 / 3
@@ -124,7 +123,7 @@ class ScanNodes(Node):
 
 # Specific Node implementations
 @register_node('Seq Scan')
-class SeqScanNode(ScanNodes):  # Inherit from ScanNodes
+class SeqScanNode(ScanNodes):  # done
     def fetch_stats(self, depth):
         indent = '    ' * depth
         table_name = self.node_json.get('Relation Name')
@@ -132,10 +131,10 @@ class SeqScanNode(ScanNodes):  # Inherit from ScanNodes
             self.cursor.execute("SELECT reltuples, relpages FROM pg_class WHERE relname = %s", (table_name,))
             stats = self.cursor.fetchone()
             if stats:
-                manual_cost = stats['relpages']  # Simplified cost calculation based on page count
+                manual_cost = stats['relpages']  
                 dbms_estimated_cost = self.node_json.get('Total Cost')
 
-                explanation = super().fetch_stats(depth)  # Call to modified fetch_stats from ScanNodes
+                explanation = super().fetch_stats(depth) 
                 explanation += f"{indent}Manual Cost Formula: B(R) = {manual_cost}\n"
                 explanation += f"{indent}Calculated Cost: {manual_cost} (Estimated Cost by DBMS: {dbms_estimated_cost})\n"
                 
@@ -146,7 +145,7 @@ class SeqScanNode(ScanNodes):  # Inherit from ScanNodes
         return ""
 
 @register_node('Index Scan')
-class IndexScanNode(ScanNodes):  # Inherit from ScanNodes
+class IndexScanNode(ScanNodes):  # done
     def fetch_stats(self, depth):
         indent = '    ' * depth
         index_name = self.node_json.get('Index Name')
@@ -157,14 +156,14 @@ class IndexScanNode(ScanNodes):  # Inherit from ScanNodes
             T_R = self.fetch_total_tuples(table_name)
             condition = self.node_json.get('Index Cond', '')
 
-            # Determine if the condition is a range query
+            # if condition is range query
             if any(op in condition for op in ['<=', '>=', '<', '>']):
                 V_R_a = 3
             else:
                 V_R_a = self.fetch_unique_values(table_name, column_name, condition)
 
             if V_R_a == 0:
-                V_R_a = 1  # Prevent division by zero
+                V_R_a = 1  # dont allow divide 0
 
             manual_cost = T_R / V_R_a
             estimated_cost = self.node_json.get('Total Cost')
