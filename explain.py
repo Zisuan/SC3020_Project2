@@ -151,31 +151,56 @@ class IndexScanNode(ScanNodes):  # Inherit from ScanNodes
         indent = '    ' * depth
         index_name = self.node_json.get('Index Name')
         table_name = self.node_json.get('Relation Name')
-        if index_name and table_name:
-            self.cursor.execute("SELECT idx_scan, idx_tup_read FROM pg_stat_user_indexes WHERE indexrelname = %s", (index_name,))
-            index_stats = self.cursor.fetchone()
-            if index_stats:
-                manual_cost = index_stats['idx_tup_read']  # Simplified cost calculation based on tuple reads
-                estimated_cost = self.node_json.get('Total Cost')
+        column_name = self.extract_column_name_from_index(index_name)
 
-                explanation = super().fetch_stats(depth)  # Call to modified fetch_stats from ScanNodes
-                explanation += f"{indent}Manual Cost Formula: T(R) / V(R, a) = {manual_cost}\n"
-                explanation += f"{indent}Calculated Cost: {manual_cost} (Estimated Cost by DBMS: {estimated_cost})\n"
-                
-                if manual_cost != estimated_cost:
-                    explanation += f"{indent}Difference Explanation: Factors like index selectivity and disk I/O are optimized by PostgreSQL.\n"
-                
-                return explanation
+        if index_name and table_name and column_name:
+            T_R = self.fetch_total_tuples(table_name)
+            condition = self.node_json.get('Index Cond', '')
+
+            # Determine if the condition is a range query
+            if any(op in condition for op in ['<=', '>=', '<', '>']):
+                V_R_a = 3
+            else:
+                V_R_a = self.fetch_unique_values(table_name, column_name, condition)
+
+            if V_R_a == 0:
+                V_R_a = 1  # Prevent division by zero
+
+            manual_cost = T_R / V_R_a
+            estimated_cost = self.node_json.get('Total Cost')
+
+            explanation = super().fetch_stats(depth)
+            explanation += f"{indent}Manual Cost Formula: T(R) / V(R, a) = {manual_cost}\n"
+            explanation += f"{indent}Calculated Cost: {manual_cost} (Estimated Cost by DBMS: {estimated_cost})\n"
+
+            if manual_cost != estimated_cost:
+                explanation += f"{indent}Difference Explanation: Factors like index selectivity and disk I/O are optimized by PostgreSQL.\n"
+
+            return explanation
         return ""
 
-    def calculate_cost(self, table_name, index_name):
-        # Fetch total tuples (T(R)) and unique values (V(R, a))
+    def fetch_total_tuples(self, table_name):
         self.cursor.execute("SELECT reltuples FROM pg_class WHERE relname = %s", (table_name,))
-        total_tuples = self.cursor.fetchone()[0]
-        self.cursor.execute("SELECT count(DISTINCT column_name) FROM table_name WHERE index_name = %s", (index_name,))
-        unique_values = self.cursor.fetchone()[0]
-        return total_tuples / unique_values if unique_values else total_tuples  # Protect against division by zero if no unique values
+        result = self.cursor.fetchone()
+        return result[0] if result else 0
 
+    def fetch_unique_values(self, table_name, column_name, condition):
+        query = f"SELECT COUNT(DISTINCT {column_name}) FROM {table_name}"
+        self.cursor.execute(query)
+        result = self.cursor.fetchone()
+        return result[0] if result else 0
+
+    def extract_column_name_from_index(self, index_name):
+        self.cursor.execute("""
+            SELECT attname
+            FROM pg_index
+            JOIN pg_class ON pg_class.oid = pg_index.indexrelid
+            JOIN pg_attribute ON pg_attribute.attrelid = pg_class.oid AND pg_attribute.attnum = ANY(pg_index.indkey)
+            WHERE pg_class.relname = %s
+        """, (index_name,))
+        result = self.cursor.fetchone()
+        return result[0] if result else None
+    
 @register_node('Nested Loop Join') # done
 class NestedLoopJoinNode(ScanNodes): 
     def fetch_stats(self, depth):
