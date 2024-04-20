@@ -156,7 +156,7 @@ class IndexScanNode(ScanNodes):
             manual_cost = self.calculate_cost(table_name, index_name, filter_condition)
 
             explanation = super().fetch_stats(depth)
-            explanation += f"{indent}Manual Cost Formula: T(R) / V(R, a) = {manual_cost}\n"
+            explanation += f"{indent}Manual Cost Formula: Index Scan Cost = {manual_cost}\n"
             explanation += f"{indent}Calculated Cost: {manual_cost} (Estimated Cost by DBMS: {estimated_cost})\n"
 
             if manual_cost != estimated_cost:
