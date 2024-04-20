@@ -322,8 +322,6 @@ def extract_node_data(plan):
     return node_data
 
 def convert_qep_to_graph_data(qep_json):
-    # Extract and convert the JSON into a structure that contains nodes and their relationships
-    # This is a placeholder for your implementation
     root_node = qep_json['Plan']
     graph_data = {'root': extract_node_data(root_node)}
     return graph_data

@@ -41,7 +41,7 @@ class AppGUI:
         self.explanation_display.pack(fill=tk.BOTH, expand=True, padx=75, pady=(5, 0))
 
         # Canvas for Graphical QEP Display in the right pane
-        self.canvas = tk.Canvas(right_pane, bg="white")
+        self.canvas = tk.Canvas(right_pane, bg="lightgray")
         self.canvas.pack(fill=tk.BOTH, expand=True)
 
         # Add horizontal scrollbar for explanation display
@@ -63,7 +63,7 @@ class AppGUI:
             y2 = y + height // 2
 
             # Draw the node rectangle
-            self.canvas.create_rectangle(x1, y1, x2, y2, fill="lightgray")
+            self.canvas.create_rectangle(x1, y1, x2, y2, fill="white")
 
             # Display the node type and cost within the rectangle
             self.canvas.create_text(x, y, text=f"{node['type']}\nCost: {node['cost']}")
